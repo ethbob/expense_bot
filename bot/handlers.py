@@ -258,10 +258,10 @@ async def cb_add_skip(cq: CallbackQuery, state: FSMContext, db: Database, cfg: C
 # ================= баланс =================
 
 async def _balance_earliest(db: Database, cfg: Config) -> tuple[int, int] | None:
-    state = await balance.get_backfill(db)
-    if not state:
+    started = await balance.get_since(db)
+    if not started:
         return None
-    since = datetime.fromisoformat(state["since"]).astimezone(cfg.tz)
+    since = started[0].astimezone(cfg.tz)
     return since.year, since.month
 
 

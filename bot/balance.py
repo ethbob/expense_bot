@@ -36,18 +36,18 @@ async def set_anchor(db: Database, block: int, balance: Decimal, at: datetime) -
         {"block": block, "balance": str(balance), "at": at.isoformat()}))
 
 
-async def get_backfill(db: Database) -> dict | None:
-    raw = await db.get_kv("backfill")
-    return json.loads(raw) if raw else None
+async def get_since(db: Database) -> tuple[datetime, Decimal] | None:
+    """С какого момента ведётся история баланса и каким он был в тот момент."""
+    raw = await db.get_kv("balance_since")
+    if not raw:
+        return None
+    d = json.loads(raw)
+    return datetime.fromisoformat(d["at"]), Decimal(d["balance"])
 
 
-async def set_backfill(db: Database, state: dict) -> None:
-    await db.set_kv("backfill", json.dumps(state))
-
-
-def backfill_progress(state: dict) -> int:
-    total = max(1, state["to"] - state["from"])
-    return min(100, int((state["cursor"] - state["from"]) * 100 / total))
+async def ensure_since(db: Database, balance: Decimal, at: datetime) -> None:
+    if await db.get_kv("balance_since") is None:
+        await db.set_kv("balance_since", json.dumps({"at": at.isoformat(), "balance": str(balance)}))
 
 
 # ---------- расчёт ----------
@@ -63,11 +63,11 @@ async def daily_balances(db: Database, tz: ZoneInfo, first: date, last: date) ->
     которые случились после конца нужного дня.
     """
     anchor = await get_anchor(db)
-    state = await get_backfill(db)
-    if anchor is None or not state or not state.get("done"):
+    started = await get_since(db)
+    if anchor is None or started is None:
         return {}
     anchor_block, running, _ = anchor
-    since = datetime.fromisoformat(state["since"]).astimezone(tz).date()
+    since = started[0].astimezone(tz).date()
 
     today = datetime.now(tz).date()
     last = min(last, today)
@@ -83,7 +83,7 @@ async def daily_balances(db: Database, tz: ZoneInfo, first: date, last: date) ->
                 f = flows[i]
                 running -= f["amount"] if f["direction"] == "in" else -f["amount"]
                 i += 1
-        if d >= since - timedelta(days=1):
+        if d >= since:
             result[d] = running
         d -= timedelta(days=1)
     return result
@@ -159,7 +159,7 @@ def overview_chart(series: dict[date, Decimal]) -> bytes:
                         else MONTHS_SHORT[d.month - 1] for d in month_starts])
     ax.annotate(_thousands(ys[-1], None), (xs[-1], ys[-1]), textcoords="offset points",
                 xytext=(-10, 8), ha="right", fontsize=10, color=CURRENT_COLOR, fontweight="bold")
-    ax.set_title("Баланс USDT за 6 месяцев", loc="left", fontsize=13, color="#111827", pad=12)
+    ax.set_title("Баланс USDT", loc="left", fontsize=13, color="#111827", pad=12)
     _style(ax)
     return _png(fig)
 
@@ -167,24 +167,15 @@ def overview_chart(series: dict[date, Decimal]) -> bytes:
 # ---------- то, что отдаём в бота ----------
 
 async def status_text(db: Database) -> str | None:
-    """Сообщение, если история ещё не готова; None — если всё готово."""
-    state = await get_backfill(db)
-    if not state:
-        return "⏳ История баланса ещё не начала загружаться. Загляни через пару минут."
-    if not state.get("done"):
-        return (f"⏳ Восстанавливаю историю баланса за 6 месяцев: {backfill_progress(state)}%.\n"
-                "Как закончу — пришлю сообщение.")
-    if await get_anchor(db) is None:
-        return "⏳ Ещё не успел проверить текущий баланс. Загляни через минуту."
+    """Сообщение, если баланс ещё ни разу не проверялся; None — если всё готово."""
+    if await get_anchor(db) is None or await get_since(db) is None:
+        return "⏳ Ещё не успел проверить баланс. Загляни через минуту."
     return None
 
 
 async def month_view(db: Database, tz: ZoneInfo, year: int, month: int) -> tuple[str, bytes | None]:
     wait = await status_text(db)
     if wait:
-        anchor = await get_anchor(db)
-        if anchor:
-            wait = f"💰 Баланс сейчас: <b>{reports.fmt(anchor[1])} USDT</b>\n\n" + wait
         return wait, None
 
     py, pm = reports.shift_month(year, month, -1)
@@ -203,14 +194,22 @@ async def month_view(db: Database, tz: ZoneInfo, year: int, month: int) -> tuple
     ):
         if not data:
             continue
-        start = series.get(start_key, data[min(data)])
+        if start_key in series:
+            start, start_label = series[start_key], ""
+        else:
+            # история началась посреди месяца — берём баланс на момент старта учёта
+            started_at, start = await get_since(db)
+            start_label = f" (с {started_at.astimezone(tz):%d.%m})"
         end = data[max(data)]
         end_label = "сейчас" if max(data) == datetime.now(tz).date() else f"{max(data):%d.%m}"
-        lines.append(f"<b>{label}</b>: {reports.fmt(start)} → {reports.fmt(end)} ({end_label})  "
-                     f"<b>{_signed(end - start)}</b>")
+        lines.append(f"<b>{label}</b>: {reports.fmt(start)}{start_label} → {reports.fmt(end)} "
+                     f"({end_label})  <b>{_signed(end - start)}</b>")
 
     if not cur:
         return "\n".join(lines + ["", "За этот месяц истории нет."]), None
+    if len(series) < 2:
+        lines.append("\nℹ️ История баланса ведётся с сегодняшнего дня — график "
+                     "будет заполняться по дням.")
     chart = month_chart(f"Баланс USDT — {reports.month_title(year, month).lower()}",
                         reports.month_title(year, month), cur,
                         reports.month_title(py, pm), prev)
@@ -221,18 +220,19 @@ async def overview_view(db: Database, tz: ZoneInfo) -> tuple[str, bytes | None]:
     wait = await status_text(db)
     if wait:
         return wait, None
-    state = await get_backfill(db)
-    since = datetime.fromisoformat(state["since"]).astimezone(tz).date()
+    started_at, start_value = await get_since(db)
+    since = started_at.astimezone(tz).date()
     today = datetime.now(tz).date()
-    series = await daily_balances(db, tz, since - timedelta(days=1), today)
-    start_value = series.pop(since - timedelta(days=1), None)
+    first = max(since, today - timedelta(days=183))
+    series = await daily_balances(db, tz, first, today)
     if len(series) < 2:
-        return "Пока мало данных для графика.", None
-    if start_value is None:
-        start_value = series[min(series)]
+        return ("Пока мало данных для общего графика: история баланса ведётся "
+                f"с {since:%d.%m.%Y}. Загляни через пару дней."), None
+    if first > since:
+        start_value = series[first]
 
     lines = [f"💰 Баланс сейчас: <b>{reports.fmt(series[today])} USDT</b>",
-             f"На {since:%d.%m.%Y}: {reports.fmt(start_value)} → сейчас: "
+             f"С {first:%d.%m.%Y}: {reports.fmt(start_value)} → сейчас: "
              f"<b>{_signed(series[today] - start_value)}</b>", ""]
     # баланс на конец каждого месяца
     for d in sorted(series):

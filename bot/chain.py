@@ -90,17 +90,6 @@ class BscClient:
                 int(block["timestamp"], 16), tz=timezone.utc)
         return self._block_time_cache[number]
 
-    async def find_block_at(self, moment: datetime) -> int:
-        """Первый блок с временем >= moment (бинарный поиск)."""
-        lo, hi = 1, await self.block_number()
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if await self.block_time(mid) < moment:
-                lo = mid + 1
-            else:
-                hi = mid
-        return lo
-
     async def usdt_balance(self, wallet: str, block: int) -> Decimal:
         data = BALANCE_OF + "0" * 24 + wallet.lower()[2:]
         raw = await self._call("eth_call", [{"to": USDT_CONTRACT, "data": data}, hex(block)])

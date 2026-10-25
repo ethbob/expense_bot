@@ -152,7 +152,7 @@ def balance_nav(year: int, month: int, tz: ZoneInfo, earliest: tuple[int, int] |
         row.append(IB(text=f"{reports.MONTHS[nm - 1]} »", callback_data=f"bal:{_ym(ny, nm)}"))
     return InlineKeyboardMarkup(inline_keyboard=[
         row,
-        [IB(text="📈 6 месяцев", callback_data="bal:all"),
+        [IB(text="📈 Вся история", callback_data="bal:all"),
          IB(text="🔄 Обновить", callback_data=f"bal:{_ym(year, month)}")],
     ])
 

@@ -93,7 +93,9 @@ async def update_balance(db: Database, cfg: Config, client: BscClient, block: in
         if abs(expected - actual) > Decimal("0.000001"):
             log.warning("Баланс не сходится: ожидалось %s, в блокчейне %s (блоки %s–%s)",
                         expected, actual, prev[0], block)
-    await balance.set_anchor(db, block, actual, datetime.now(cfg.tz))
+    now = datetime.now(cfg.tz)
+    await balance.set_anchor(db, block, actual, now)
+    await balance.ensure_since(db, actual, now)
 
 
 async def scanner_loop(bot: Bot, db: Database, cfg: Config, client: BscClient) -> None:
@@ -105,105 +107,6 @@ async def scanner_loop(bot: Bot, db: Database, cfg: Config, client: BscClient) -
         except Exception:  # noqa: BLE001
             log.exception("Ошибка сканирования блокчейна")
         await asyncio.sleep(cfg.poll_interval)
-
-
-# ---------- восстановление истории баланса ----------
-
-BACKFILL_MONTHS = 6
-MIN_RANGE, MAX_RANGE = 50, 50_000
-
-
-async def backfill_once(bot: Bot, db: Database, cfg: Config, client: BscClient) -> bool:
-    """Догружает историю переводов. Возвращает True, когда всё готово."""
-    state = await balance.get_backfill(db)
-    if state and state.get("done"):
-        return True
-
-    last = await db.get_kv("last_block")
-    if last is None:
-        return False  # сканер ещё не стартовал
-
-    if not state:
-        now = datetime.now(cfg.tz)
-        y, m = reports.shift_month(now.year, now.month, -BACKFILL_MONTHS)
-        since = datetime(y, m, 1, tzinfo=cfg.tz)
-        from_block = await client.find_block_at(since - timedelta(days=1))
-        state = {"since": since.isoformat(), "from": from_block, "to": int(last),
-                 "cursor": from_block - 1, "range": 5000, "done": False, "msg": None}
-        msg = await bot.send_message(
-            cfg.owner_id,
-            f"⏳ Восстанавливаю историю баланса USDT с {since:%d.%m.%Y}. "
-            "Это займёт несколько минут, учёт расходов работает как обычно.")
-        state["msg"] = msg.message_id
-        await balance.set_backfill(db, state)
-        log.info("История: блоки %s–%s", state["from"], state["to"])
-
-    last_reported = backfill_progress_bucket(state)
-    while state["cursor"] < state["to"]:
-        start = state["cursor"] + 1
-        end = min(start + state["range"] - 1, state["to"])
-        try:
-            out = await client.outgoing_usdt(cfg.wallet, start, end)
-            inc = await client.incoming_usdt(cfg.wallet, start, end)
-        except Exception as e:  # noqa: BLE001
-            if state["range"] <= MIN_RANGE:
-                raise
-            state["range"] = max(MIN_RANGE, state["range"] // 4)
-            log.info("Уменьшаю шаг истории до %s блоков (%s)", state["range"], e)
-            continue
-        await db.insert_flows(await flows_from(client, cfg.wallet, out + inc))
-        state["cursor"] = end
-        state["range"] = min(MAX_RANGE, state["range"] * 2)
-        await balance.set_backfill(db, state)
-
-        bucket = backfill_progress_bucket(state)
-        if bucket != last_reported:
-            last_reported = bucket
-            await _edit_progress(bot, cfg, state)
-
-    state["done"] = True
-    await balance.set_backfill(db, state)
-    await _edit_progress(bot, cfg, state)
-    await bot.send_message(cfg.owner_id, "✅ История баланса за 6 месяцев готова — жми «💰 Баланс».")
-    return True
-
-
-def backfill_progress_bucket(state: dict) -> int:
-    return balance.backfill_progress(state) // 10
-
-
-async def _edit_progress(bot: Bot, cfg: Config, state: dict) -> None:
-    if not state.get("msg"):
-        return
-    pct = 100 if state.get("done") else balance.backfill_progress(state)
-    since = datetime.fromisoformat(state["since"]).astimezone(cfg.tz)
-    try:
-        await bot.edit_message_text(
-            f"{'✅' if state.get('done') else '⏳'} История баланса USDT с {since:%d.%m.%Y}: {pct}%",
-            chat_id=cfg.owner_id, message_id=state["msg"])
-    except Exception:  # noqa: BLE001
-        pass
-
-
-async def backfill_loop(bot: Bot, db: Database, cfg: Config, client: BscClient) -> None:
-    warned = False
-    while True:
-        try:
-            if await backfill_once(bot, db, cfg, client):
-                return
-            await asyncio.sleep(15)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            log.exception("Ошибка восстановления истории")
-            if not warned:
-                warned = True
-                await bot.send_message(
-                    cfg.owner_id,
-                    "⚠️ Не получается загрузить старую историю переводов — публичные узлы BNB Chain "
-                    f"не отдают её ({str(e)[:150]}).\nБуду пробовать снова каждые 10 минут. "
-                    "Если не поможет — нужен бесплатный ключ NodeReal, см. README.")
-            await asyncio.sleep(600)
 
 
 # ---------- напоминания и итоги месяца ----------

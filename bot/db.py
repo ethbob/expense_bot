@@ -74,6 +74,8 @@ class Database:
                 "INSERT INTO kv (key, value) VALUES ('started_at', $1) ON CONFLICT (key) DO NOTHING",
                 datetime.now(timezone.utc).isoformat(),
             )
+            # остатки от убранной загрузки старой истории
+            await conn.execute("DELETE FROM kv WHERE key = 'backfill'")
 
     async def close(self) -> None:
         await self.pool.close()
