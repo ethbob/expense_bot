@@ -21,6 +21,20 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS ix_transactions_occurred ON transactions (occurred_at);
 CREATE INDEX IF NOT EXISTS ix_transactions_status ON transactions (status);
 
+-- Все входящие и исходящие переводы USDT (для истории баланса)
+CREATE TABLE IF NOT EXISTS usdt_flows (
+    tx_hash      TEXT NOT NULL,
+    log_index    INTEGER NOT NULL,
+    block_number BIGINT NOT NULL,
+    direction    TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+    counterparty TEXT NOT NULL,
+    amount       NUMERIC(38, 18) NOT NULL,
+    occurred_at  TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (tx_hash, log_index)
+);
+CREATE INDEX IF NOT EXISTS ix_usdt_flows_block ON usdt_flows (block_number);
+CREATE INDEX IF NOT EXISTS ix_usdt_flows_occurred ON usdt_flows (occurred_at);
+
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -146,6 +160,40 @@ class Database:
 
     async def summary(self, start: datetime, end: datetime) -> asyncpg.Record:
         return await self.pool.fetchrow(SUMMARY_SQL, start, end)
+
+    # --- поток USDT для баланса ---
+    async def insert_flows(self, flows: list[tuple]) -> None:
+        """flows: (tx_hash, log_index, block_number, direction, counterparty, amount, occurred_at)"""
+        if not flows:
+            return
+        await self.pool.executemany(
+            """
+            INSERT INTO usdt_flows (tx_hash, log_index, block_number, direction,
+                                    counterparty, amount, occurred_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (tx_hash, log_index) DO NOTHING
+            """,
+            flows,
+        )
+
+    async def net_flow_between_blocks(self, after_block: int, upto_block: int) -> Decimal:
+        return await self.pool.fetchval(
+            """
+            SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END), 0)
+            FROM usdt_flows WHERE block_number > $1 AND block_number <= $2
+            """,
+            after_block, upto_block,
+        )
+
+    async def flows_since(self, start: datetime, upto_block: int):
+        return await self.pool.fetch(
+            """
+            SELECT direction, amount, occurred_at FROM usdt_flows
+            WHERE occurred_at >= $1 AND block_number <= $2
+            ORDER BY occurred_at DESC
+            """,
+            start, upto_block,
+        )
 
     async def export_rows(self, start: datetime | None):
         if start is None:

@@ -3,3 +3,4 @@ asyncpg>=0.30
 aiohttp>=3.9
 openpyxl>=3.1
 tzdata
+matplotlib>=3.8

@@ -8,8 +8,10 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardMarkup,
+                           InputMediaPhoto, Message)
 
+from . import balance
 from . import keyboards as kb
 from . import reports
 from .config import Config
@@ -27,6 +29,7 @@ HELP = (
     f"{kb.BTN_TXS} — список, примечания, удаление\n"
     f"{kb.BTN_ADD} — неучтённый расход вручную\n"
     f"{kb.BTN_PENDING} — то, что ещё не разобрано\n"
+    f"{kb.BTN_BALANCE} — график баланса USDT по месяцам\n"
     f"{kb.BTN_PERIOD} — 1, 2, 3 или 6 месяцев (скользящий период)\n"
     f"{kb.BTN_EXPORT} — выгрузка в Excel"
 )
@@ -250,6 +253,66 @@ async def cb_add_skip(cq: CallbackQuery, state: FSMContext, db: Database, cfg: C
     await cq.message.edit_reply_markup(reply_markup=None)
     await _save_manual(cq.message, state, db, cfg, None)
     await cq.answer()
+
+
+# ================= баланс =================
+
+async def _balance_earliest(db: Database, cfg: Config) -> tuple[int, int] | None:
+    state = await balance.get_backfill(db)
+    if not state:
+        return None
+    since = datetime.fromisoformat(state["since"]).astimezone(cfg.tz)
+    return since.year, since.month
+
+
+async def _show_balance(message: Message, text: str, chart: bytes | None,
+                        markup: InlineKeyboardMarkup | None, edit: bool) -> None:
+    if edit and chart and message.photo:
+        await message.edit_media(
+            InputMediaPhoto(media=BufferedInputFile(chart, "balance.png"), caption=text),
+            reply_markup=markup)
+    elif edit and not chart and not message.photo:
+        await safe_edit(message, text, markup)
+    elif chart:
+        await message.answer_photo(BufferedInputFile(chart, "balance.png"), caption=text,
+                                   reply_markup=markup)
+    else:
+        await message.answer(text, reply_markup=markup)
+
+
+async def _balance_month(message: Message, db: Database, cfg: Config, year: int, month: int,
+                         edit: bool) -> None:
+    text, chart = await balance.month_view(db, cfg.tz, year, month)
+    markup = kb.balance_nav(year, month, cfg.tz, await _balance_earliest(db, cfg)) if chart else None
+    await _show_balance(message, text, chart, markup, edit)
+
+
+@router.message(F.text == kb.BTN_BALANCE)
+async def show_balance(message: Message, state: FSMContext, db: Database, cfg: Config):
+    await state.clear()
+    now = datetime.now(cfg.tz)
+    await message.bot.send_chat_action(message.chat.id, "upload_photo")
+    await _balance_month(message, db, cfg, now.year, now.month, edit=False)
+
+
+@router.callback_query(F.data.startswith("bal:"))
+async def cb_balance(cq: CallbackQuery, db: Database, cfg: Config):
+    arg = cq.data[4:]
+    await cq.answer()
+    if arg == "all":
+        text, chart = await balance.overview_view(db, cfg.tz)
+        await _show_balance(cq.message, text, chart, kb.balance_overview() if chart else None, edit=True)
+        return
+    if arg == "now":
+        now = datetime.now(cfg.tz)
+        year, month = now.year, now.month
+    else:
+        year, month = parse_ym(arg)
+    try:
+        await _balance_month(cq.message, db, cfg, year, month, edit=True)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
 
 
 # ================= период и экспорт =================

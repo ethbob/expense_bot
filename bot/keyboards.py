@@ -12,7 +12,7 @@ BTN_ADD = "➕ Добавить расход"
 BTN_PENDING = "⏳ Неразобранные"
 BTN_PERIOD = "📈 За период"
 BTN_EXPORT = "📤 Экспорт"
-MENU_BUTTONS = {BTN_MONTH, BTN_TXS, BTN_ADD, BTN_PENDING, BTN_PERIOD, BTN_EXPORT}
+BTN_BALANCE = "💰 Баланс"
 
 PERIODS = [30, 60, 90, 180]
 
@@ -22,7 +22,8 @@ def main_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=BTN_MONTH), KeyboardButton(text=BTN_TXS)],
             [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_PENDING)],
-            [KeyboardButton(text=BTN_PERIOD), KeyboardButton(text=BTN_EXPORT)],
+            [KeyboardButton(text=BTN_BALANCE), KeyboardButton(text=BTN_PERIOD)],
+            [KeyboardButton(text=BTN_EXPORT)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -137,6 +138,31 @@ def month_nav(year: int, month: int, tz: ZoneInfo) -> InlineKeyboardMarkup:
     else:
         row.append(IB(text="🔄 Обновить", callback_data=f"mon:{_ym(year, month)}"))
     return InlineKeyboardMarkup(inline_keyboard=[row])
+
+
+def balance_nav(year: int, month: int, tz: ZoneInfo, earliest: tuple[int, int] | None
+                ) -> InlineKeyboardMarkup:
+    now = datetime.now(tz)
+    row = []
+    py, pm = reports.shift_month(year, month, -1)
+    if earliest is None or (py, pm) >= earliest:
+        row.append(IB(text=f"« {reports.MONTHS[pm - 1]}", callback_data=f"bal:{_ym(py, pm)}"))
+    if (year, month) < (now.year, now.month):
+        ny, nm = reports.shift_month(year, month, 1)
+        row.append(IB(text=f"{reports.MONTHS[nm - 1]} »", callback_data=f"bal:{_ym(ny, nm)}"))
+    return InlineKeyboardMarkup(inline_keyboard=[
+        row,
+        [IB(text="📈 6 месяцев", callback_data="bal:all"),
+         IB(text="🔄 Обновить", callback_data=f"bal:{_ym(year, month)}")],
+    ])
+
+
+def balance_overview() -> InlineKeyboardMarkup:
+    now_cb = "bal:now"
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        IB(text="📊 По месяцам", callback_data=now_cb),
+        IB(text="🔄 Обновить", callback_data="bal:all"),
+    ]])
 
 
 def periods(selected: int | None = None) -> InlineKeyboardMarkup:

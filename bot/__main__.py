@@ -12,7 +12,7 @@ from .chain import BscClient
 from .config import load_config
 from .db import Database
 from .handlers import router
-from .tasks import housekeeping_loop, scanner_loop
+from .tasks import backfill_loop, housekeeping_loop, scanner_loop
 
 
 class OwnerOnly(BaseMiddleware):
@@ -51,6 +51,7 @@ async def main() -> None:
     background = [
         asyncio.create_task(scanner_loop(bot, db, cfg, client)),
         asyncio.create_task(housekeeping_loop(bot, db, cfg)),
+        asyncio.create_task(backfill_loop(bot, db, cfg, client)),
     ]
     logging.info("Бот запущен, слежу за кошельком %s", cfg.wallet)
     try:
