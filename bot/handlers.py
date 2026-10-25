@@ -11,7 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardMarkup,
                            InputMediaPhoto, Message)
 
-from . import balance
+from . import balance, importer
 from . import keyboards as kb
 from . import reports
 from .config import Config
@@ -30,6 +30,7 @@ HELP = (
     f"{kb.BTN_ADD} — неучтённый расход вручную\n"
     f"{kb.BTN_PENDING} — то, что ещё не разобрано\n"
     f"{kb.BTN_BALANCE} — график баланса USDT по месяцам\n"
+    "Старую историю баланса можно загрузить, отправив мне CSV из BscScan.\n"
     f"{kb.BTN_PERIOD} — 1, 2, 3 или 6 месяцев (скользящий период)\n"
     f"{kb.BTN_EXPORT} — выгрузка в Excel"
 )
@@ -407,6 +408,26 @@ async def note_text(message: Message, state: FSMContext, db: Database, cfg: Conf
         await message.answer("📝 Примечание сохранено" if note else "Примечание удалено")
     except TelegramBadRequest:
         await message.answer(reports.tx_card(tx, cfg.tz), reply_markup=kb.tx_card(tx))
+
+
+@router.message(F.document)
+async def csv_import(message: Message, state: FSMContext, db: Database, cfg: Config, bot: Bot):
+    await state.clear()
+    doc = message.document
+    if not (doc.file_name or "").lower().endswith(".csv"):
+        await message.answer("Я принимаю только CSV-выгрузку из BscScan для загрузки истории баланса.")
+        return
+    if (doc.file_size or 0) > 20 * 1024 * 1024:
+        await message.answer("Файл слишком большой (больше 20 МБ).")
+        return
+    await message.answer("⏳ Загружаю историю из файла…")
+    buf = await bot.download(doc)
+    try:
+        res = await importer.import_csv(db, cfg.wallet, buf.read())
+    except importer.ImportErrorText as e:
+        await message.answer(f"⚠️ {e}")
+        return
+    await message.answer(importer.result_text(res, cfg.tz))
 
 
 @router.message()
