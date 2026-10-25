@@ -1,0 +1,5 @@
+aiogram>=3.20,<4
+asyncpg>=0.30
+aiohttp>=3.9
+openpyxl>=3.1
+tzdata
